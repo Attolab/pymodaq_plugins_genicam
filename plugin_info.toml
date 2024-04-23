@@ -1,19 +1,18 @@
 ## To modify by developer(s) of the plugin
 
 [plugin-info]
-SHORT_PLUGIN_NAME = 'template'  #to be modified, for instance daqmx then rename the module name:
-# (pymodaq_plugins_template become pymodaq_plugins_daqmx for instance)
+SHORT_PLUGIN_NAME = 'genicam'
 
-package-url = 'https://github.com/PyMoDAQ/pymodaq_plugins_template' #to modify
-description = 'some word about your plugin'
+package-url = 'https://github.com/PyMoDAQ/pymodaq_plugins_genicam'
+description = 'Plugin package for the PyMoDAQ framework adding camera compatible with the GeniCam standard to PyMoDAQ'
 
-author = 'Author Name'
-author-email = 'Author email'
+author = 'Sebastien J. Weber'
+author-email = 'sebastien.weber@cnrs.fr'
 license = 'MIT'
 
 [plugin-install]
 #packages required for your plugin:
-packages-required = ['pymodaq>=4.1.0']
+packages-required = ['pymodaq>=4.1.0', 'harvesters']
 
 [features]  # defines the plugin features contained into this plugin
 instruments = true  # true if plugin contains instrument classes (else false, notice the lowercase for toml files)
