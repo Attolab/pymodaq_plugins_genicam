@@ -2,15 +2,16 @@ import numpy as np
 
 from qtpy import QtWidgets, QtCore
 
-from pymodaq.utils.daq_utils import ThreadCommand, recursive_find_files_extension
+from pymodaq_utils.utils import ThreadCommand, recursive_find_files_extension
 from pymodaq.utils.data import DataFromPlugins, Axis, DataToExport
 from pymodaq.control_modules.viewer_utility_classes import DAQ_Viewer_base, comon_parameters, main
 from pymodaq.utils.parameter import Parameter
 from pymodaq.utils.parameter import utils as putils
 from pymodaq.utils.enums import BaseEnum
 from pymodaq.utils.gui_utils import select_file, ListPicker
+from pymodaq_gui.parameter.utils import set_param_from_param
 
-from harvesters.core import Harvester, ImageAcquirer
+from harvesters.core import Harvester, ImageAcquirer, Callback
 from harvesters.util.pfnc import mono_location_formats, \
     rgb_formats, bgr_formats, \
     rgba_formats, bgra_formats
@@ -18,7 +19,10 @@ from harvesters.util.pfnc import mono_location_formats, \
 try:
     cti_paths = recursive_find_files_extension(r'C:\Program Files\MATRIX VISION\mvIMPACT Acquire\bin\x64', 'cti')
 except:
-    cti_paths = []
+    try:
+        cti_paths = recursive_find_files_extension(r'C:\Program Files\Teledyne\Spinnaker\cti64\vs2015', 'cti')
+    except:
+        cti_paths = []
 
 
 class EInterfaceType(BaseEnum):
@@ -66,6 +70,8 @@ class DAQ_2DViewer_GenICam(DAQ_Viewer_base):
              [
                  {'title': 'Cam. names:', 'name': 'cam_name', 'type': 'list',
                   'limits': devices_names},
+                 {'title': 'Update features:', 'name': 'update_features', 'type': 'bool_push',
+                  'value': False},
                  {'title': 'Cam. Prop.:', 'name': 'cam_settings', 'type': 'group', 'children': []},
               ]
 
@@ -75,13 +81,10 @@ class DAQ_2DViewer_GenICam(DAQ_Viewer_base):
         self.x_axis: Axis = None
         self.y_axis: Axis = None
 
-        self.grabbing = False
-
         self.width = None
         self.width_max = None
         self.height = None
         self.height_max = None
-
         self.data = None
 
     def commit_settings(self, param: Parameter):
@@ -95,11 +98,11 @@ class DAQ_2DViewer_GenICam(DAQ_Viewer_base):
         if param.name() in putils.iter_children(self.settings.child('cam_settings'), []):
 
             self.stop()
-            while self.controller.is_acquiring_images:
+            while self.controller.is_acquiring():
                 self.stop()
                 QtWidgets.QApplication.processEvents()
 
-            feature = self.controller.device.node_map.get_node(param.name())
+            feature = self.controller.remote_device.node_map.get_node(param.name())
             interface_type = feature.node.principal_interface_type
             if interface_type == EInterfaceType.intfIInteger:
                 val = int((param.value() // param.opts['step']) * param.opts['step'])
@@ -108,14 +111,17 @@ class DAQ_2DViewer_GenICam(DAQ_Viewer_base):
             feature.value = val  # set the desired value
             param.setValue(feature.value)  # retrieve the actually set one
 
-            ##deprecated
-            # if param.name() in ['Height', 'Width', 'OffsetX', 'OffsetY']:
-            #     if param.name() in ['Height', 'Width'] and not self.settings.child('ROIselect',
-            #                                                                        'use_ROI').value():
-            #         self.width = self.controller.device.node_map.get_node('Width').value
-            #         self.height = self.controller.device.node_map.get_node('Height').value
-            #
-            #         self.data = np.zeros((self.height, self.width))
+            if param.name() in ['Height', 'Width', 'OffsetX', 'OffsetY']:
+                    self.width = self.controller.remote_device.node_map.get_node('Width').value
+                    self.height = self.controller.remote_device.node_map.get_node('Height').value
+                    self.get_yaxis()
+                    self.get_xaxis()
+                    self.data = np.zeros((self.height, self.width))
+
+        elif param.name() == "update_features":
+            if param.value():
+                self.get_features()
+                self.settings.child("update_features").setValue(False)
         ##deprecated
         # if param.name() in putils.iter_children(self.settings.child('ROIselect'), []):
         #
@@ -139,14 +145,14 @@ class DAQ_2DViewer_GenICam(DAQ_Viewer_base):
             step = param_to_set.opts['step']
             val = int((param.value() // step) * step)
             param_to_set.setValue(val)
-            self.controller.device.node_map.get_node('Width').value = val
+            self.controller.remote_device.node_map.get_node('Width').value = val
 
             param = self.settings.child('ROIselect', 'height')
             param_to_set = params[param_names.index('Height')]
             step = param_to_set.opts['step']
             val = int((param.value() // step) * step)
             param_to_set.setValue(val)
-            self.controller.device.node_map.get_node('Height').value = val
+            self.controller.remote_device.node_map.get_node('Height').value = val
 
 
             param = self.settings.child('ROIselect', 'x0')
@@ -154,58 +160,48 @@ class DAQ_2DViewer_GenICam(DAQ_Viewer_base):
             step = param_to_set.opts['step']
             val = int((param.value() // step) * step)
             param_to_set.setValue(val)
-            self.controller.device.node_map.get_node('OffsetX').value = val
+            self.controller.remote_device.node_map.get_node('OffsetX').value = val
 
             param = self.settings.child('ROIselect', 'y0')
             param_to_set = params[param_names.index('OffsetY')]
             step = param_to_set.opts['step']
             val = int((param.value() // step) * step)
             param_to_set.setValue(val)
-            self.controller.device.node_map.get_node('OffsetY').value = val
+            self.controller.remote_device.node_map.get_node('OffsetY').value = val
 
         else:
             # one starts by settings offsets so that width and height could be set accordingly
             param_to_set = params[param_names.index('OffsetX')]
             val = 0
             param_to_set.setValue(val)
-            self.controller.device.node_map.get_node('OffsetX').value = val
+            self.controller.remote_device.node_map.get_node('OffsetX').value = val
 
             param_to_set = params[param_names.index('OffsetY')]
             val = 0
             param_to_set.setValue(val)
-            self.controller.device.node_map.get_node('OffsetY').value = val
+            self.controller.remote_device.node_map.get_node('OffsetY').value = val
 
             param_to_set = params[param_names.index('Width')]
             val = self.width_max
             param_to_set.setValue(val)
-            self.controller.device.node_map.get_node('Width').value = val
+            self.controller.remote_device.node_map.get_node('Width').value = val
 
 
             param_to_set = params[param_names.index('Height')]
             val = self.height_max
             param_to_set.setValue(val)
-            self.controller.device.node_map.get_node('Height').value = val
+            self.controller.remote_device.node_map.get_node('Height').value = val
 
     def get_features(self):
-        features = self.controller.device.node_map.Root.features
-        # self.newsettings = Parameter.create(name='cam_settingsd', type='group', children=self.populate_settings(features))
-        #self.send_param_status(self.settings.child(('cam_settings')),[(self.settings.child(('cam_settings')),'childAdded', self.newsettings)])
-        self.settings.child('cam_settings').addChildren(self.populate_settings(features))
+        features = self.controller.remote_device.node_map.Root.features
 
-    def update_features(self):
-        #start = time.perf_counter()
-        for child in putils.iter_children_params(self.settings.child('cam_settings'),[]):
-            try:
-                if self.controller.device.node_map.get_node(child.name()).get_access_mode() == 0:
-                    child.setOpts(visible=False)
-                elif self.controller.device.node_map.get_node(child.name()).get_access_mode() in [1, 3]:
-                    child.setOpts(enabled=False)
-                else:
-                    child.setOpts(visible=True)
-                    child.setOpts(enabled=True)
-                child.setValue(self.controller.device.node_map.get_node(child.name()).value)
-            except Exception as e:
-                pass
+        if self.settings.child('cam_settings').hasChildren():
+            newsettings = Parameter.create(name='cam_settings', type='group', children=self.populate_settings(features))
+            set_param_from_param(self.settings.child('cam_settings'), newsettings)
+
+        else:
+            self.settings.child('cam_settings').addChildren(self.populate_settings(features))
+
 
     def populate_settings(self, features, param_list: list = None):
         if param_list is None:
@@ -215,18 +211,18 @@ class DAQ_2DViewer_GenICam(DAQ_Viewer_base):
                 if feature.node.visibility == 0:  # parameters for "beginners"
                     interface_type = feature.node.principal_interface_type
                     item = {}
-                    if interface_type == EInterfaceType.intfIBoolean:
+                    if interface_type == EInterfaceType.intfIBoolean.value:
                         item.update({'type': 'bool',
                                      'value': True if feature.value.lower() == 'true' else False,
                                      'readonly': feature.get_access_mode() in [0, 1, 3],
                                      'enabled': not (feature.get_access_mode() in [0, 1, 3])})
-                    elif interface_type == EInterfaceType.intfIFloat:
+                    elif interface_type == EInterfaceType.intfIFloat.value:
                         item.update({'type': 'float', 'value': feature.value,
                                      'readonly': feature.get_access_mode() in [0, 1, 3],
                                      'enabled': not (feature.get_access_mode() in [0, 1, 3]),
                                      'min': feature.min,
                                      'max': feature.max})
-                    elif interface_type == EInterfaceType.intfIInteger:
+                    elif interface_type == EInterfaceType.intfIInteger.value:
                         item.update({'type': 'int', 'value': feature.value,
                                      'step': feature.inc,
                                      'readonly': feature.get_access_mode() in [0, 1, 3],
@@ -234,20 +230,20 @@ class DAQ_2DViewer_GenICam(DAQ_Viewer_base):
                                      'min': feature.min,
                                      'max': feature.max})
                         # print(feature.node.name)
-                    elif interface_type == EInterfaceType.intfIString:
+                    elif interface_type == EInterfaceType.intfIString.value:
                         item.update({'type': 'str', 'value': feature.value,
                                      'readonly': feature.get_access_mode() in [0, 1, 3],
                                      'enabled': not (feature.get_access_mode() in [0, 1, 3])
                                      })
 
-                    elif interface_type == EInterfaceType.intfIEnumeration:
+                    elif interface_type == EInterfaceType.intfIEnumeration.value:
                         item.update({'type': 'list', 'value': feature.value,
                                      'limits': [f.node.display_name for f in feature.entries],
                                      'readonly': feature.get_access_mode() in [0, 1, 3],
                                      'enabled': not (feature.get_access_mode() in [0, 1, 3])
                                      })
 
-                    elif interface_type == EInterfaceType.intfICategory:
+                    elif interface_type == EInterfaceType.intfICategory.value:
                         new_list = []
                         item.update({'type': 'group',
                                      'children': self.populate_settings(feature.node.children,
@@ -296,25 +292,32 @@ class DAQ_2DViewer_GenICam(DAQ_Viewer_base):
                 self.settings.child('cam_name').setValue(devices_names[0])
                 QtWidgets.QApplication.processEvents()
 
-            self.controller = harv.create_image_acquirer(
-                model=self.settings.child('cam_name').value())
-            self.controller.num_buffers = 2
-            self.controller.device.node_map.get_node('OffsetX').value = 0
-            self.controller.device.node_map.get_node('OffsetY').value = 0
-            self.controller.device.node_map.get_node(
-                'Width').value = self.controller.device.node_map.get_node('Width').max
-            self.controller.device.node_map.get_node(
-                'Height').value = self.controller.device.node_map.get_node('Height').max
+            self.controller = harv.create({'model': self.settings.child('cam_name').value()})
+            # self.controller.num_buffers = 2
+            self.controller.remote_device.node_map.get_node('OffsetX').value = 0
+            self.controller.remote_device.node_map.get_node('OffsetY').value = 0
+            self.controller.remote_device.node_map.get_node(
+                'Width').value = self.controller.remote_device.node_map.get_node('Width').max
+            self.controller.remote_device.node_map.get_node(
+                'Height').value = self.controller.remote_device.node_map.get_node('Height').max
             self.get_features()
 
-        self.controller.on_new_buffer_arrival = self.emit_data
+        on_new_buffer_callback =  CallbackOnNewBuffer()
+        self.callback_thread = QtCore.QThread()
+        on_new_buffer_callback.moveToThread(self.callback_thread)
+        on_new_buffer_callback.frames_available.connect(self.emit_data)
+
+        self.controller.add_callback(
+             ImageAcquirer.Events.NEW_BUFFER_AVAILABLE,
+             on_new_buffer_callback
+        )
 
         self.x_axis = self.get_xaxis()
         self.y_axis = self.get_yaxis()
-        self.width_max = self.controller.device.node_map.get_node('Width').max
-        self.width = self.controller.device.node_map.get_node('Width').value
-        self.height_max = self.controller.device.node_map.get_node('Height').max
-        self.height = self.controller.device.node_map.get_node('Height').value
+        self.width_max = self.controller.remote_device.node_map.get_node('Width').max
+        self.width = self.controller.remote_device.node_map.get_node('Width').value
+        self.height_max = self.controller.remote_device.node_map.get_node('Height').max
+        self.height = self.controller.remote_device.node_map.get_node('Height').value
         self.data = np.zeros((self.height, self.width))
         # initialize viewers with the future type of data
         self.dte_signal_temp.emit(
@@ -332,7 +335,7 @@ class DAQ_2DViewer_GenICam(DAQ_Viewer_base):
         """
 
         """
-        Nx = self.controller.device.node_map.get_node('Width').value
+        Nx = self.controller.remote_device.node_map.get_node('Width').value
         self.x_axis = Axis('xaxis', units='pxls', data=np.linspace(0, Nx-1, Nx, dtype=np.int32),
                            index=1)
         return self.x_axis
@@ -341,7 +344,7 @@ class DAQ_2DViewer_GenICam(DAQ_Viewer_base):
         """
 
         """
-        Ny = self.controller.device.node_map.get_node('Height').value
+        Ny = self.controller.remote_device.node_map.get_node('Height').value
         self.y_axis = Axis('yaxis', units='pxls', data=np.linspace(0, Ny-1, Ny, dtype=np.int32),
                            index=0)
         return self.y_axis
@@ -353,58 +356,58 @@ class DAQ_2DViewer_GenICam(DAQ_Viewer_base):
         harv.reset()
 
     def emit_data(self):
-        if self.grabbing:
-            with self.controller.fetch_buffer() as buffer:
-                payload = buffer.payload
-                component = payload.components[0]
-                width = component.width
-                height = component.height
-                data_format = component.data_format
 
-                # if self.settings.child('ROIselect', 'use_ROI').value():
-                #     offsetx = self.controller.device.node_map.get_node('OffsetX').value
-                #     offsety = self.controller.device.node_map.get_node('OffsetY').value
-                # else:
-                #     offsetx = 0
-                #     offsety = 0
-                offsetx = 0
-                offsety = 0
+        with self.controller.fetch() as buffer:
+            payload = buffer.payload
+            component = payload.components[0]
+            width = component.width
+            height = component.height
+            data_format = component.data_format
 
-                if data_format in mono_location_formats:
-                    data_tmp = component.data.reshape(height, width)
-                    self.data[offsety:offsety + height, offsetx:offsetx + width] = data_tmp
-                    self.dte_signal.emit(
-                        DataToExport('myplugin',
-                                     data=[
-                                         DataFromPlugins(name='GenICam', data=[self.data],
-                                                         dim='Data2D',
-                                                         axes=[self.x_axis, self.y_axis])]))
-                else:
-                    # The image requires you to reshape it to draw it on the canvas:
-                    if data_format in rgb_formats or \
-                            data_format in rgba_formats or \
-                            data_format in bgr_formats or \
-                            data_format in bgra_formats:
-                        #
-                        content = component.data.reshape(height, width,
-                                                         int(component.num_components_per_pixel)
-                                                         # Set of R, G, B, and Alpha
-                                                         )
-                        #
-                        if data_format in bgr_formats:
-                            # Swap every R and B:
-                            content = content[:, :, ::-1]
-                    self.data_grabed_signal.emit(
-                        DataToExport('myplugin',
-                                     data=[
-                                         DataFromPlugins(name='GenICam',
-                                                         data=[
-                                                             self.data[:, :, ind] for ind in
-                                                             range(min(3, component.num_components_per_pixel))],
-                                                         dim='Data2D',
-                                                         axes=[self.x_axis, self.y_axis])]))
+            # if self.settings.child('ROIselect', 'use_ROI').value():
+            #     offsetx = self.controller.remote_device.node_map.get_node('OffsetX').value
+            #     offsety = self.controller.remote_device.node_map.get_node('OffsetY').value
+            # else:
+            #     offsetx = 0
+            #     offsety = 0
+            offsetx = 0
+            offsety = 0
 
-                self.grabbing = False
+            if data_format in mono_location_formats:
+                data_tmp = component.data.reshape(height, width)
+                self.data[offsety:offsety + height, offsetx:offsetx + width] = data_tmp
+                self.dte_signal.emit(
+                    DataToExport('myplugin',
+                                 data=[
+                                     DataFromPlugins(name='GenICam', data=[self.data],
+                                                     dim='Data2D',
+                                                     axes=[self.x_axis, self.y_axis])]))
+            else:
+                # The image requires you to reshape it to draw it on the canvas:
+                if data_format in rgb_formats or \
+                        data_format in rgba_formats or \
+                        data_format in bgr_formats or \
+                        data_format in bgra_formats:
+                    #
+                    content = component.data.reshape(height, width,
+                                                     int(component.num_components_per_pixel)
+                                                     # Set of R, G, B, and Alpha
+                                                     )
+                    #
+                    if data_format in bgr_formats:
+                        # Swap every R and B:
+                        content = content[:, :, ::-1]
+                self.data_grabed_signal.emit(
+                    DataToExport('myplugin',
+                                 data=[
+                                     DataFromPlugins(name='GenICam',
+                                                     data=[
+                                                         self.data[:, :, ind] for ind in
+                                                         range(min(3, component.num_components_per_pixel))],
+                                                     dim='Data2D',
+                                                     axes=[self.x_axis, self.y_axis])]))
+
+
 
     def grab_data(self, Naverage=1, **kwargs):
         """Start a grab from the detector
@@ -417,26 +420,31 @@ class DAQ_2DViewer_GenICam(DAQ_Viewer_base):
         kwargs: dict
             others optionals arguments
         """
-        self.grabbing = True
+        if 'live' in kwargs:
+            self.live = kwargs['live']
 
-        if not self.controller.is_acquiring_images:
-            self.controller.start_image_acquisition()
+        if not self.controller.is_acquiring():
+            self.controller.start(run_as_thread=True)  # set to True in order to catch `NEW_BUFFER_AVAILABLE` event
 
 
     def stop(self):
         """Stop the current grab hardware wise if necessary"""
-        ind = 0
-        while self.controller.is_acquiring_images and ind < 10:
-            try:
-                self.controller.stop_image_acquisition()
+        self.controller.stop()
 
-            except Exception as e:
-                pass
-            QtCore.QThread.msleep(500)
-            print('stopping acquisition')
 
-        return ""
+class CallbackOnNewBuffer(QtCore.QObject, Callback):
+    # Callback class to handle new buffer arrivals
+    # Follows instructions from https://github.com/genicam/harvesters/wiki/FAQ
+    frames_available = QtCore.Signal()
+
+    def __init__(self, wait_time=10):
+        super().__init__()
+        self.wait_time = wait_time
+
+    def emit(self, context):
+        self.frames_available.emit()
+        QtCore.QThread.msleep(self.wait_time)
 
 
 if __name__ == '__main__':
-    main(__file__, init=False)
+    main(__file__, init=True)
