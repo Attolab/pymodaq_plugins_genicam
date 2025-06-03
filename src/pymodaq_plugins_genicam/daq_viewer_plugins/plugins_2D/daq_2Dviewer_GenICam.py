@@ -104,7 +104,7 @@ class DAQ_2DViewer_GenICam(DAQ_Viewer_base):
 
             feature = self.controller.remote_device.node_map.get_node(param.name())
             interface_type = feature.node.principal_interface_type
-            if interface_type == EInterfaceType.intfIInteger:
+            if interface_type == EInterfaceType.intfIInteger.value:
                 val = int((param.value() // param.opts['step']) * param.opts['step'])
             else:
                 val = param.value()
@@ -237,8 +237,11 @@ class DAQ_2DViewer_GenICam(DAQ_Viewer_base):
                                      })
 
                     elif interface_type == EInterfaceType.intfIEnumeration.value:
+                        limits_dict = {}
+                        for f in feature.entries:
+                            limits_dict[f.node.display_name] = f.symbolic
                         item.update({'type': 'list', 'value': feature.value,
-                                     'limits': [f.node.display_name for f in feature.entries],
+                                     'limits': limits_dict,
                                      'readonly': feature.get_access_mode() in [0, 1, 3],
                                      'enabled': not (feature.get_access_mode() in [0, 1, 3])
                                      })
